@@ -125,6 +125,9 @@ const htmlPage = `<!DOCTYPE html>
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
         font-size: 0.95rem;
         white-space: pre-line;
+        max-height: 12rem;
+        overflow-y: auto;
+        padding-right: 0.25rem;
         color: rgba(214, 227, 255, 0.8);
       }
       footer {
@@ -176,22 +179,23 @@ const htmlPage = `<!DOCTYPE html>
       const button = document.getElementById('convert-btn');
       const progress = document.getElementById('progress');
       const status = document.getElementById('status');
+      let statusLogs = [];
 
       button.addEventListener('click', async () => {
         const file = fileInput.files?.[0];
         if (!file) {
-          updateStatus('Please choose an image first.');
+          updateStatus('Please choose an image first.', { reset: true });
           return;
         }
 
         const targetSizeBytes = readTargetSize(targetSizeInput.value);
         if (targetSizeBytes <= 0) {
-          updateStatus('Target size must be a positive number.');
+          updateStatus('Target size must be a positive number.', { reset: true });
           return;
         }
 
         disableUI(true);
-        updateStatus('Reading file...');
+        updateStatus('Reading file...', { reset: true });
         progress.hidden = false;
         progress.value = 10;
 
@@ -226,7 +230,12 @@ const htmlPage = `<!DOCTYPE html>
             \`Compressing to WebP targeting \${(targetSizeBytes / (1024 * 1024)).toFixed(2)} MB at \${canvas.width}x\${canvas.height}...\`
           );
           progress.value = 40;
-          const { blob, quality } = await compressToTarget(canvas, targetSizeBytes, progress, status);
+          const { blob, quality } = await compressToTarget(
+            canvas,
+            targetSizeBytes,
+            progress,
+            updateStatus
+          );
 
           updateStatus(
             \`Finished at quality \${quality.toFixed(2)}. Output size: \${(blob.size / 1024).toFixed(1)} KB (target \${(targetSizeBytes / (1024 * 1024)).toFixed(2)} MB)\`
@@ -251,8 +260,13 @@ const htmlPage = `<!DOCTYPE html>
         targetHeightInput.disabled = disabled;
       }
 
-      function updateStatus(message) {
-        status.textContent = message;
+      function updateStatus(message, { reset = false } = {}) {
+        if (reset) {
+          statusLogs = [];
+        }
+        statusLogs.push(message);
+        status.textContent = statusLogs.join('\n');
+        status.scrollTop = status.scrollHeight;
       }
 
       function readTargetSize(value) {
@@ -322,7 +336,7 @@ const htmlPage = `<!DOCTYPE html>
         });
       }
 
-      async function compressToTarget(canvas, targetSize, progressEl, statusEl) {
+      async function compressToTarget(canvas, targetSize, progressEl, logStatus) {
         const maxQuality = 0.95;
         const minQuality = 0.6;
         const fallbackQuality = 0.8;
@@ -330,6 +344,7 @@ const htmlPage = `<!DOCTYPE html>
         const originalHeight = canvas.height;
         const originalCanvas = canvas;
         let scaleFactor = 1;
+        const log = typeof logStatus === 'function' ? logStatus : () => {};
 
         while (true) {
           const workingWidth = Math.max(1, Math.round(originalWidth * scaleFactor));
@@ -339,12 +354,19 @@ const htmlPage = `<!DOCTYPE html>
               ? originalCanvas
               : createScaledCanvas(originalCanvas, workingWidth, workingHeight);
 
+          log(
+            \`Attempting compression at \${workingWidth}x\${workingHeight} (\${Math.round(
+              scaleFactor * 100
+            )}% of original resolution).\`
+          );
+
           const searchResult = await searchForQuality(
             workingCanvas,
             targetSize,
             maxQuality,
             minQuality,
-            progressEl
+            progressEl,
+            log
           );
 
           if (searchResult.success) {
@@ -356,11 +378,15 @@ const htmlPage = `<!DOCTYPE html>
           const nextWidth = originalWidth * scaleFactor;
           const nextHeight = originalHeight * scaleFactor;
 
-          if (statusEl) {
-            statusEl.textContent = \`Reducing resolution to \${Math.round(
+          log(
+            \`Even at minimum quality the output was \${formatBytes(
+              searchResult.lastAttemptSize ?? NaN
+            )}, which is above the \${formatBytes(
+              targetSize
+            )} target. Halving resolution to \${Math.round(
               Math.max(nextWidth, 1)
-            )}x\${Math.round(Math.max(nextHeight, 1))} to hit the target size...\`;
-          }
+            )}x\${Math.round(Math.max(nextHeight, 1))} and retrying...\`
+          );
 
           if (nextWidth < 1080) {
             const fallbackWidth = Math.min(originalWidth, 1080);
@@ -368,11 +394,11 @@ const htmlPage = `<!DOCTYPE html>
               1,
               Math.round((fallbackWidth / originalWidth) * originalHeight)
             );
-            if (statusEl) {
-              statusEl.textContent = \`Falling back to \${fallbackWidth}x\${fallbackHeight} at quality \${fallbackQuality.toFixed(
+            log(
+              \`Minimum resolution reached. Falling back to \${fallbackWidth}x\${fallbackHeight} at fixed quality \${fallbackQuality.toFixed(
                 2
-              )}.\`;
-            }
+              )}.\`
+            );
 
             const fallbackCanvas = createScaledCanvas(
               originalCanvas,
@@ -395,13 +421,24 @@ const htmlPage = `<!DOCTYPE html>
         targetSize,
         maxQuality,
         minQuality,
-        progressEl
+        progressEl,
+        logStatus
       ) {
+        const log = typeof logStatus === 'function' ? logStatus : () => {};
         const initialBlob = await canvasToBlob(canvas, 'image/webp', maxQuality);
         if (!initialBlob) throw new Error('WebP compression is not supported in this browser.');
         if (initialBlob.size <= targetSize) {
+          log(
+            \`Max quality (\${maxQuality.toFixed(2)}) meets target with \${formatBytes(initialBlob.size)}. Returning result.\`
+          );
           return { success: true, payload: { blob: initialBlob, quality: maxQuality } };
         }
+
+        log(
+          \`Max quality output is \${formatBytes(initialBlob.size)}, exceeding the \${formatBytes(
+            targetSize
+          )} target. Initiating binary search for optimal quality...\`
+        );
 
         let low = minQuality;
         let high = maxQuality;
@@ -417,13 +454,24 @@ const htmlPage = `<!DOCTYPE html>
           if (progressEl) progressEl.value = Math.min(percentage, 90);
 
           if (blob.size > targetSize) {
+            log(
+              \`Binary search attempt \${i + 1}: quality \${quality.toFixed(2)} produced \${formatBytes(
+                blob.size
+              )} — too large. Decreasing quality range.\`
+            );
             high = quality - 0.02;
             if (high < minQuality) {
+              log('Further reductions would go below the minimum quality threshold. Stopping search.');
               break;
             }
           } else {
             best = blob;
             bestQuality = quality;
+            log(
+              \`Binary search attempt \${i + 1}: quality \${quality.toFixed(2)} produced \${formatBytes(
+                blob.size
+              )} — within target. Trying for higher quality.\`
+            );
             low = Math.min(maxQuality, quality + 0.02);
           }
 
@@ -431,16 +479,28 @@ const htmlPage = `<!DOCTYPE html>
         }
 
         if (best) {
+          log(
+            \`Binary search converged on quality \${bestQuality.toFixed(2)} with \${formatBytes(best.size)}.\`
+          );
           return { success: true, payload: { blob: best, quality: bestQuality } };
         }
 
         const minQualityBlob = await canvasToBlob(canvas, 'image/webp', minQuality);
         if (!minQualityBlob) throw new Error('Failed to produce WebP output.');
         if (minQualityBlob.size <= targetSize) {
+          log(
+            \`Minimum quality \${minQuality.toFixed(2)} yields \${formatBytes(minQualityBlob.size)}, which meets the target.\`
+          );
           return { success: true, payload: { blob: minQualityBlob, quality: minQuality } };
         }
 
-        return { success: false };
+        log(
+          \`Even at minimum quality \${minQuality.toFixed(2)}, the output is \${formatBytes(
+            minQualityBlob.size
+          )}, which is still above the \${formatBytes(targetSize)} target.\`
+        );
+
+        return { success: false, lastAttemptSize: minQualityBlob.size };
       }
 
       function createScaledCanvas(sourceCanvas, width, height) {
@@ -466,6 +526,19 @@ const htmlPage = `<!DOCTYPE html>
         return new Promise((resolve) => {
           canvas.toBlob(resolve, type, quality);
         });
+      }
+
+      function formatBytes(bytes) {
+        if (!Number.isFinite(bytes)) return 'unknown size';
+        if (bytes === 0) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        const exponent = Math.min(
+          units.length - 1,
+          Math.floor(Math.log(bytes) / Math.log(1024))
+        );
+        const value = bytes / Math.pow(1024, exponent);
+        const decimals = value >= 10 || exponent === 0 ? 0 : 1;
+        return \`${value.toFixed(decimals)} ${units[exponent]}\`;
       }
 
       function triggerDownload(blob, filename) {
