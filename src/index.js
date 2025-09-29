@@ -61,6 +61,15 @@ const htmlPage = `<!DOCTYPE html>
         margin-top: 1.5rem;
         font-weight: 600;
       }
+      .input-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+      .input-grid label {
+        margin-top: 0;
+      }
       input[type="file"] {
         width: 100%;
         margin-top: 0.75rem;
@@ -68,6 +77,20 @@ const htmlPage = `<!DOCTYPE html>
         border-radius: 14px;
         border: 1px dashed rgba(255, 255, 255, 0.25);
         background: rgba(255, 255, 255, 0.05);
+      }
+      input[type="number"] {
+        width: 100%;
+        margin-top: 0.5rem;
+        padding: 0.7rem;
+        border-radius: 14px;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: rgba(255, 255, 255, 0.07);
+        color: inherit;
+      }
+      input[type="number"]:focus {
+        outline: none;
+        border-color: rgba(64, 249, 255, 0.6);
+        box-shadow: 0 0 0 3px rgba(64, 249, 255, 0.15);
       }
       button {
         margin-top: 2rem;
@@ -116,19 +139,40 @@ const htmlPage = `<!DOCTYPE html>
     <main>
       <h1>WebP Compressor</h1>
       <p>
-        Compress any image directly in your browser. We'll keep the original resolution
-        and target a 1MB WebP file, so nothing leaves your device.
+        Compress any image directly in your browser. Choose your target size and
+        optionally resize the output — everything happens locally on your device.
       </p>
       <label for="file-input">Choose an image</label>
       <input id="file-input" type="file" accept="image/*" />
-      <button id="convert-btn" type="button">Convert to WebP (1MB target)</button>
+      <label for="target-size">Target size (MB)</label>
+      <input
+        id="target-size"
+        type="number"
+        min="0.1"
+        step="0.1"
+        placeholder="1"
+        inputmode="decimal"
+      />
+      <div class="input-grid">
+        <label for="target-width">
+          Width (px)
+          <input id="target-width" type="number" min="1" step="1" inputmode="numeric" />
+        </label>
+        <label for="target-height">
+          Height (px)
+          <input id="target-height" type="number" min="1" step="1" inputmode="numeric" />
+        </label>
+      </div>
+      <button id="convert-btn" type="button">Convert to WebP</button>
       <progress id="progress" value="0" max="100" hidden></progress>
       <div id="status" aria-live="polite"></div>
       <footer>All processing happens locally — no uploads required.</footer>
     </main>
     <script>
-      const TARGET_SIZE = 1024 * 1024; // 1MB
       const fileInput = document.getElementById('file-input');
+      const targetSizeInput = document.getElementById('target-size');
+      const targetWidthInput = document.getElementById('target-width');
+      const targetHeightInput = document.getElementById('target-height');
       const button = document.getElementById('convert-btn');
       const progress = document.getElementById('progress');
       const status = document.getElementById('status');
@@ -137,6 +181,12 @@ const htmlPage = `<!DOCTYPE html>
         const file = fileInput.files?.[0];
         if (!file) {
           updateStatus('Please choose an image first.');
+          return;
+        }
+
+        const targetSizeBytes = readTargetSize(targetSizeInput.value);
+        if (targetSizeBytes <= 0) {
+          updateStatus('Target size must be a positive number.');
           return;
         }
 
@@ -152,16 +202,35 @@ const htmlPage = `<!DOCTYPE html>
           const image = await loadImage(dataUrl);
 
           const canvas = document.createElement('canvas');
-          canvas.width = image.naturalWidth;
-          canvas.height = image.naturalHeight;
+          const { width: canvasWidth, height: canvasHeight } = resolveDimensions(
+            image,
+            targetWidthInput.value,
+            targetHeightInput.value
+          );
+          canvas.width = canvasWidth;
+          canvas.height = canvasHeight;
           const ctx = canvas.getContext('2d');
-          ctx.drawImage(image, 0, 0);
+          ctx.drawImage(
+            image,
+            0,
+            0,
+            image.naturalWidth,
+            image.naturalHeight,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+          );
 
-          updateStatus('Compressing to WebP...');
+          updateStatus(
+            \`Compressing to WebP targeting \${(targetSizeBytes / (1024 * 1024)).toFixed(2)} MB at \${canvas.width}x\${canvas.height}...\`
+          );
           progress.value = 40;
-          const { blob, quality } = await compressToTarget(canvas, TARGET_SIZE, progress, status);
+          const { blob, quality } = await compressToTarget(canvas, targetSizeBytes, progress, status);
 
-          updateStatus(\`Finished at quality \${quality.toFixed(2)}. Size: \${(blob.size / 1024).toFixed(1)} KB\`);
+          updateStatus(
+            \`Finished at quality \${quality.toFixed(2)}. Output size: \${(blob.size / 1024).toFixed(1)} KB (target \${(targetSizeBytes / (1024 * 1024)).toFixed(2)} MB)\`
+          );
           progress.value = 100;
 
           triggerDownload(blob, file.name.replace(/\.[^.]+$/, '') + '.webp');
@@ -177,10 +246,62 @@ const htmlPage = `<!DOCTYPE html>
       function disableUI(disabled) {
         button.disabled = disabled;
         fileInput.disabled = disabled;
+        targetSizeInput.disabled = disabled;
+        targetWidthInput.disabled = disabled;
+        targetHeightInput.disabled = disabled;
       }
 
       function updateStatus(message) {
         status.textContent = message;
+      }
+
+      function readTargetSize(value) {
+        const trimmed = value.trim();
+        if (!trimmed) {
+          return 1024 * 1024;
+        }
+        const parsed = Number(trimmed);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+          return -1;
+        }
+        return parsed * 1024 * 1024;
+      }
+
+      function parseDimension(value) {
+        const trimmed = value.trim();
+        if (!trimmed) return null;
+        const parsed = Number(trimmed);
+        if (!Number.isFinite(parsed) || parsed <= 0) return null;
+        return Math.round(parsed);
+      }
+
+      function resolveDimensions(image, widthValue, heightValue) {
+        const naturalWidth = image.naturalWidth;
+        const naturalHeight = image.naturalHeight;
+        const desiredWidth = parseDimension(widthValue);
+        const desiredHeight = parseDimension(heightValue);
+
+        if (desiredWidth && desiredHeight) {
+          return { width: desiredWidth, height: desiredHeight };
+        }
+
+        if (desiredWidth) {
+          const derivedHeight = Math.max(
+            1,
+            Math.round((desiredWidth / naturalWidth) * naturalHeight)
+          );
+          return { width: desiredWidth, height: derivedHeight };
+        }
+
+        if (desiredHeight) {
+          const derivedWidth = Math.max(
+            1,
+            Math.round((desiredHeight / naturalHeight) * naturalWidth)
+          );
+          return { width: derivedWidth, height: desiredHeight };
+        }
+
+        return { width: naturalWidth, height: naturalHeight };
       }
 
       function readFileAsDataURL(file) {
@@ -236,9 +357,9 @@ const htmlPage = `<!DOCTYPE html>
           const nextHeight = originalHeight * scaleFactor;
 
           if (statusEl) {
-            statusEl.textContent = `Reducing resolution to ${Math.round(
+            statusEl.textContent = \`Reducing resolution to \${Math.round(
               Math.max(nextWidth, 1)
-            )}x${Math.round(Math.max(nextHeight, 1))} to hit the target size...`;
+            )}x\${Math.round(Math.max(nextHeight, 1))} to hit the target size...\`;
           }
 
           if (nextWidth < 1080) {
@@ -248,9 +369,9 @@ const htmlPage = `<!DOCTYPE html>
               Math.round((fallbackWidth / originalWidth) * originalHeight)
             );
             if (statusEl) {
-              statusEl.textContent = `Falling back to ${fallbackWidth}x${fallbackHeight} at quality ${fallbackQuality.toFixed(
+              statusEl.textContent = \`Falling back to \${fallbackWidth}x\${fallbackHeight} at quality \${fallbackQuality.toFixed(
                 2
-              )}.`;
+              )}.\`;
             }
 
             const fallbackCanvas = createScaledCanvas(
