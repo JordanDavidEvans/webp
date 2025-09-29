@@ -161,7 +161,7 @@ const htmlPage = `<!DOCTYPE html>
           progress.value = 40;
           const { blob, quality } = await compressToTarget(canvas, TARGET_SIZE, progress, status);
 
-          updateStatus(`Finished at quality ${quality.toFixed(2)}. Size: ${(blob.size / 1024).toFixed(1)} KB`);
+          updateStatus(\`Finished at quality \${quality.toFixed(2)}. Size: \${(blob.size / 1024).toFixed(1)} KB\`);
           progress.value = 100;
 
           triggerDownload(blob, file.name.replace(/\.[^.]+$/, '') + '.webp');
