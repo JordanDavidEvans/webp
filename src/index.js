@@ -201,19 +201,91 @@ const htmlPage = `<!DOCTYPE html>
         });
       }
 
-      async function compressToTarget(canvas, targetSize, progressEl) {
+      async function compressToTarget(canvas, targetSize, progressEl, statusEl) {
         const maxQuality = 0.95;
-        const minQuality = 0.05;
+        const minQuality = 0.6;
+        const fallbackQuality = 0.8;
+        const originalWidth = canvas.width;
+        const originalHeight = canvas.height;
+        const originalCanvas = canvas;
+        let scaleFactor = 1;
+
+        while (true) {
+          const workingWidth = Math.max(1, Math.round(originalWidth * scaleFactor));
+          const workingHeight = Math.max(1, Math.round(originalHeight * scaleFactor));
+          const workingCanvas =
+            scaleFactor === 1
+              ? originalCanvas
+              : createScaledCanvas(originalCanvas, workingWidth, workingHeight);
+
+          const searchResult = await searchForQuality(
+            workingCanvas,
+            targetSize,
+            maxQuality,
+            minQuality,
+            progressEl
+          );
+
+          if (searchResult.success) {
+            return searchResult.payload;
+          }
+
+          // We need to reduce the resolution and try again.
+          scaleFactor /= 2;
+          const nextWidth = originalWidth * scaleFactor;
+          const nextHeight = originalHeight * scaleFactor;
+
+          if (statusEl) {
+            statusEl.textContent = `Reducing resolution to ${Math.round(
+              Math.max(nextWidth, 1)
+            )}x${Math.round(Math.max(nextHeight, 1))} to hit the target size...`;
+          }
+
+          if (nextWidth < 1080) {
+            const fallbackWidth = Math.min(originalWidth, 1080);
+            const fallbackHeight = Math.max(
+              1,
+              Math.round((fallbackWidth / originalWidth) * originalHeight)
+            );
+            if (statusEl) {
+              statusEl.textContent = `Falling back to ${fallbackWidth}x${fallbackHeight} at quality ${fallbackQuality.toFixed(
+                2
+              )}.`;
+            }
+
+            const fallbackCanvas = createScaledCanvas(
+              originalCanvas,
+              fallbackWidth,
+              fallbackHeight
+            );
+            const fallbackBlob = await canvasToBlob(
+              fallbackCanvas,
+              'image/webp',
+              fallbackQuality
+            );
+            if (!fallbackBlob) throw new Error('Failed to produce WebP output.');
+            return { blob: fallbackBlob, quality: fallbackQuality };
+          }
+        }
+      }
+
+      async function searchForQuality(
+        canvas,
+        targetSize,
+        maxQuality,
+        minQuality,
+        progressEl
+      ) {
+        const initialBlob = await canvasToBlob(canvas, 'image/webp', maxQuality);
+        if (!initialBlob) throw new Error('WebP compression is not supported in this browser.');
+        if (initialBlob.size <= targetSize) {
+          return { success: true, payload: { blob: initialBlob, quality: maxQuality } };
+        }
+
         let low = minQuality;
         let high = maxQuality;
         let best = null;
         let bestQuality = maxQuality;
-
-        const initialBlob = await canvasToBlob(canvas, 'image/webp', maxQuality);
-        if (!initialBlob) throw new Error('WebP compression is not supported in this browser.');
-        if (initialBlob.size <= targetSize) {
-          return { blob: initialBlob, quality: maxQuality };
-        }
 
         for (let i = 0; i < 10; i++) {
           const quality = low + (high - low) / 2;
@@ -225,23 +297,48 @@ const htmlPage = `<!DOCTYPE html>
 
           if (blob.size > targetSize) {
             high = quality - 0.02;
+            if (high < minQuality) {
+              break;
+            }
           } else {
             best = blob;
             bestQuality = quality;
-            low = quality + 0.02;
+            low = Math.min(maxQuality, quality + 0.02);
           }
 
           if (high <= low) break;
         }
 
         if (best) {
-          return { blob: best, quality: bestQuality };
+          return { success: true, payload: { blob: best, quality: bestQuality } };
         }
 
-        // Fall back to the lowest achievable quality if still above target.
-        const fallback = await canvasToBlob(canvas, 'image/webp', minQuality);
-        if (!fallback) throw new Error('Failed to produce WebP output.');
-        return { blob: fallback, quality: minQuality };
+        const minQualityBlob = await canvasToBlob(canvas, 'image/webp', minQuality);
+        if (!minQualityBlob) throw new Error('Failed to produce WebP output.');
+        if (minQualityBlob.size <= targetSize) {
+          return { success: true, payload: { blob: minQualityBlob, quality: minQuality } };
+        }
+
+        return { success: false };
+      }
+
+      function createScaledCanvas(sourceCanvas, width, height) {
+        const scaledCanvas = document.createElement('canvas');
+        scaledCanvas.width = Math.max(1, Math.round(width));
+        scaledCanvas.height = Math.max(1, Math.round(height));
+        const context = scaledCanvas.getContext('2d');
+        context.drawImage(
+          sourceCanvas,
+          0,
+          0,
+          sourceCanvas.width,
+          sourceCanvas.height,
+          0,
+          0,
+          scaledCanvas.width,
+          scaledCanvas.height
+        );
+        return scaledCanvas;
       }
 
       function canvasToBlob(canvas, type, quality) {
